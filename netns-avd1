@@ -1,0 +1,66 @@
+#!/bin/bash
+
+start() {
+rm -f /etc/systemd/network/x0avd1.in.network
+echo "[Match]" > /etc/systemd/network/ns0avd1.in.network
+echo "Name=ns0avd1in" >> /etc/systemd/network/ns0avd1.in.network
+echo "[Network]" >> /etc/systemd/network/ns0avd1.in.network
+echo "Bridge=x0tor0br1" >> /etc/systemd/network/ns0avd1.in.network
+networkctl reload
+
+ns_name=ns0avd1 \
+in_name=ns0avd1in \
+in_peer=ns0avd1in_p \
+no_out=yes \
+in_dhcp=yes \
+./x0netns start
+
+networkctl renew ns0avd1in 
+ip netns exec ns0avd1 iptables -A INPUT -p udp ! --dport 53 -j DROP
+ip netns exec ns0avd1 iptables -A OUTPUT -p udp ! --dport 53 -j DROP
+ip netns exec ns0avd1 iptables -A INPUT -p icmp -j DROP
+ip netns exec ns0avd1 iptables -A OUTPUT -p icmp -j DROP
+ip netns exec ns0avd1 dhclient
+}
+
+run_emulator() {
+ip netns exec ns0avd1 su -c "/home/user/Android/Sdk/emulator/emulator @avd1_1  -dns-server 192.168.1.1" $SUDO_USER
+}
+
+run_studio() {
+ip netns exec ns0avd1 su -c "/home/user/android-studio/bin/studio.sh" $SUDO_USER
+}
+
+ns_shell() {
+ip netns exec ns0avd1 bash
+}
+
+stop() {
+ns_name=ns0avd1 \
+in_name=ns0avd1in \
+in_peer=ns0avd1in_p \
+no_out=yes \
+in_dhcp=yes \
+./x0netns start
+}
+
+case $1 in
+	"start")
+		start
+		;;
+	"stop")
+		stop
+		;;
+	"run")
+		run_emulator
+		;;
+	"studio")
+		run_studio
+		;;
+	"shell")
+		ns_shell
+		;;
+	*)
+		echo "Usage netns-avdX start | stop | run | studio"
+		exit 1
+esac

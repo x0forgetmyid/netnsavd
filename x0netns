@@ -1,0 +1,141 @@
+#!/bin/bash
+
+create_ns() {
+	local i
+	local nse
+
+	nse=`ip netns list | grep $ns_name`
+	if [ ! -z "$nse" ]; then
+		echo "Network namespace $ns_name exists! Skip initialization!"
+		return 1
+	fi
+
+	echo "Creating namespace $ns_name"
+	echo "Add netns $ns_name"
+	i=3
+	ip netns add $ns_name
+	while true
+	do
+	    nse=`ip netns list | grep $ns_name`
+	    if [ ! -z "$nse" ]; then
+		echo "Network namespace successfully created"
+		break;
+	    else
+		if (( i = 0 )); then
+		    echo "Can't create namespace after 3 attempts! Error!"
+		    exit 2
+		fi
+
+		echo "Maybe namespace creation is delayed. Wait 30 seconds."
+		i=$((i--))
+		sleep 30
+		ip netns add $ns_name
+	    fi
+	done
+
+	echo "Disable IPv6 for $ns_name"
+	ip netns exec $ns_name sysctl -w net.ipv4.ip_forward=1
+	ip netns exec $ns_name sysctl -w net.ipv6.conf.all.disable_ipv6=1
+	ip netns exec $ns_name sysctl -w net.ipv6.conf.default.disable_ipv6=1
+
+	echo "Create loopback interface"
+        ip netns exec $ns_name ip addr add 127.0.0.1/8 dev lo
+        ip netns exec $ns_name ip link set lo up 
+
+	if [ -z "${no_out+x}" ]; then
+	    echo "Create out interface: veth $out_name peer $out_peer"
+	    ip link add $out_name type veth peer $out_peer
+	    ip link set $out_peer netns $ns_name
+	    ip netns exec $ns_name ip addr add $out_ip brd + dev $out_peer
+	    ip netns exec $ns_name ip link set name $out_peer up
+
+        	if [ -z "${no_fw_dns+x}" ]; then
+            		ip netns exec $ns_name iptables -t nat -A PREROUTING -p udp  --dport 53 -j DNAT --to $in_gw:53
+        	fi
+
+        	if [ -z "${no_nat}" ]; then
+            		ip netns exec $ns_name iptables -t nat -A POSTROUTING -j MASQUERADE
+	        fi
+
+	fi
+
+	echo "Create in interface: veth $in_name peer $in_peer"
+	ip link add $in_name type veth peer name $in_peer
+	ip link set $in_peer netns $ns_name
+
+	echo "Add namespace $ns_name ip addresses for in $in_peer:"
+	if [ -z "${in_dhcp+x}" ]; then
+	    echo "STATIC"
+	    ip netns exec $ns_name ip addr add $in_ip brd + dev $in_peer
+	    ip netns exec $ns_name ip link set name $in_peer up
+
+	    if [ ! -z "${in_gw+x}" ]; then
+		echo "GATE: $in_gw"
+		ip netns exec $ns_name ip route add default via $in_gw dev $in_peer
+	    fi
+	else
+	    if [ ! -z "${in_br+x}" ]; then
+            ip link set $in_name up
+	    	ip netns exec $ns_name ip link set $in_peer up
+            echo "DHCP"
+            sleep 3
+	        ip netns exec $ns_name dhclient $in_peer
+	    else
+		echo "No bridge: network not configured!"
+	    fi
+	fi
+
+	if [ ! -z "${in_dns+x}" ]; then
+        	echo "Set resolv.conf"
+        	mkdir -p /etc/netns/$ns_name
+        	echo "nameserver $in_dns" > /etc/netns/$ns_name/resolv.conf
+        	[ ! -z "${gw_dns+x}" ] && ip netns exec $ns_name iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to $in_gw:53
+	fi
+
+	echo "Ready!"
+}
+
+delete_ns() {
+	nse=`ip netns list | grep $ns_name`
+	if [ -z "$nse" ]; then
+		echo "Network namespace $ns_name doesn't exist!"
+		return 1
+	fi
+
+	ip link set $in_name down
+	ip netns exec $ns_name ip link set $in_peer down
+	ip link delete $in_name
+
+	if [ -z "{$no_out+x}" ]; then
+            ip link set $out_name down
+            ip netns exec $ns_name ip link set $out_peer down
+	    ip link delete $out_name
+        fi
+	ip netns delete $ns_name
+}
+
+#connect()
+##	brctl addif x0br0 out_name_L
+##	ip link set out_name_L up
+##}
+
+##disconnect()
+#{
+#	ip link set out_name_L down
+#	brctl delif x0br0 out_name_L
+#}
+
+
+set -x
+
+case "$1" in
+    "start")
+	create_ns
+	;;
+    "stop")
+	delete_ns
+	;;
+    *)
+        echo "Invalid method!"
+	;;
+esac
